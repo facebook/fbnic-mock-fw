@@ -25,3 +25,7 @@ $ make LLVM=1 -j
 $ insmod ~/local/fbnic/src/fbnic.ko
 ```
 Use ifconfig and ethtool -i enp1s0 to verify that the driver is loaded
+
+## License
+
+This project is licensed under the Apache 2.0 License - see the LICENSE file for details.
