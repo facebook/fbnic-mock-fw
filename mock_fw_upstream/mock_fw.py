@@ -38,6 +38,30 @@ logger = logging.getLogger(__name__)
 REMOTE_MAX_FDS = 8
 
 
+def _get_systemd_socket() -> socket.socket | None:
+    """Return the socket passed by systemd socket activation, or None.
+
+    Checks the sd_listen_fds(3) protocol: LISTEN_PID must match our PID
+    and LISTEN_FDS must be >= 1.  With Accept=yes the passed fd (3) is an
+    already-connected stream socket.
+    """
+    SD_LISTEN_FDS_START = 3
+
+    try:
+        listen_pid = int(os.environ.get("LISTEN_PID", "0"))
+        listen_fds = int(os.environ.get("LISTEN_FDS", "0"))
+    except ValueError:
+        return None
+
+    if listen_pid != os.getpid() or listen_fds < 1:
+        return None
+
+    # fromfd() dups the fd, so close the original afterwards.
+    conn = socket.fromfd(SD_LISTEN_FDS_START, socket.AF_UNIX, socket.SOCK_STREAM)
+    os.close(SD_LISTEN_FDS_START)
+    return conn
+
+
 def setup_socket(socket_path: str) -> socket.socket:
     """Set up a Unix domain socket server."""
 
@@ -135,7 +159,12 @@ def main():
         description="Mock firmware server for testing",
         epilog="Example: ./%(prog)s /tmp/fbnic-ctrl-skt",
     )
-    parser.add_argument("socket_path", help="Path to the Unix domain socket")
+    parser.add_argument(
+        "socket_path",
+        nargs="?",
+        default=None,
+        help="Path to the Unix domain socket (omit when using systemd socket activation)",
+    )
     parser.add_argument(
         "-d",
         "--debug",
@@ -153,12 +182,25 @@ def main():
     logger.debug("Debugging enabled")
 
     socket_path = args.socket_path
-    server_sock = setup_socket(socket_path)
+    sd_sock = _get_systemd_socket()
 
-    try:
+    if sd_sock is not None:
+        # Socket activation path: fd 3 is an already-connected socket.
+        logger.info("Using systemd socket activation")
+        fw_state.conn = sd_sock
+        server_sock = None
+    elif socket_path is not None:
+        # Standalone path: create our own listening socket.
+        server_sock = setup_socket(socket_path)
         fw_state.conn, _ = server_sock.accept()
         logger.info("Client connected")
+    else:
+        logger.error(
+            "No socket path provided and systemd socket activation not detected"
+        )
+        sys.exit(1)
 
+    try:
         # Always notify the host that we are ready to accept messages
         set_host_interrupt()
         while True:
@@ -193,9 +235,10 @@ def main():
             process_all_msgs(msgs, received_fds)
 
     finally:
-        server_sock.close()
-        if os.path.exists(socket_path):
-            os.remove(socket_path)
+        if server_sock is not None:
+            server_sock.close()
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
 
 if __name__ == "__main__":
