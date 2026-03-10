@@ -1,0 +1,9 @@
+[Unit]
+Description=Mock FBNIC Firmware Socket
+
+[Socket]
+ListenStream=/tmp/fbnic-ctrl-skt
+Accept=yes
+
+[Install]
+WantedBy=sockets.target
