@@ -29,6 +29,7 @@ from mock_fw_upstream.host_messages import (
     gen_dummy_cmpl_msg,
     process_descriptor_read,
     process_descriptor_write,
+    send_sensor_threshold_exceeded,
     set_host_interrupt,
 )
 from mock_fw_upstream.mock_fw_state import fw_state, RemoteRegion
@@ -173,8 +174,17 @@ def process_msg(msg: bytes, received_fds: list[int]) -> None:
 
 def inject(cmd: str) -> None:
     """Handle an on-demand injection command from the injection socket."""
-    if cmd == "hello":
-        logger.info("Injection: hello")
+    args = cmd.split()
+    if args and args[0] == "inject_sensor_value":
+        # Format: inject_sensor_value [temp <mC>] [volt <mV>]
+        values = dict(zip(args[1::2], args[2::2]))
+        try:
+            temp = int(values["temp"]) if "temp" in values else None
+            volt = int(values["volt"]) if "volt" in values else None
+        except ValueError:
+            logger.error(f"Invalid sensor value in command: {cmd!r}")
+            return
+        send_sensor_threshold_exceeded(temp, volt)
     else:
         logger.error(f"Unknown injection command: {cmd!r}")
 

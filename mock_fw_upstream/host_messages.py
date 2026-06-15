@@ -82,6 +82,7 @@ class TlvMsgId(IntEnum):
     TSENE_DATA_RESP = 0x3D
     SET_COMPHY_MODE_REQ = 0x3E
     SET_COMPHY_MODE_RESP = 0x3F
+    SENSOR_THRESHOLD_EXCEEDED_RESP = 0x40
 
 
 class CapTlvAttrId(IntEnum):
@@ -182,6 +183,13 @@ class ComphyModeTlvAttrId(IntEnum):
     COMPHY_MODE_PAM4 = 0x0
     COMPHY_MODE_ERROR = 0x1
     COMPHY_MODE_LANE_MASK = 0x4
+
+
+class SensorThresholdTlvAttrId(IntEnum):
+    THERM_EXCEEDED_FLAG = 0x0
+    VOLT_EXCEEDED_FLAG = 0x1
+    THERMAL = 0x2
+    VOLTAGE = 0x3
 
 
 TLV_MESSAGE_HANDLERS = {}
@@ -966,6 +974,36 @@ def gen_caps_response() -> bytes:
         .add_u32(CapTlvAttrId.FW_CAP_RESP_VOLT_MIN, fw_state.get_volt_min())
         .add_u32(CapTlvAttrId.FW_CAP_RESP_VOLT_MAX, fw_state.get_volt_max())
     )
+
+
+def send_sensor_threshold_exceeded(temp: int | None, volt: int | None) -> None:
+    """Send an unsolicited sensor threshold exceeded event to the host."""
+
+    msg = TlvMessageBuilder(TlvMsgId.SENSOR_THRESHOLD_EXCEEDED_RESP)
+    exceeded = False
+
+    if temp is not None:
+        fw_state.set_curr_temp(temp)
+        if temp < fw_state.get_temp_min() or temp > fw_state.get_temp_warn():
+            msg.add_s32(SensorThresholdTlvAttrId.THERM_EXCEEDED_FLAG, 1)
+            msg.add_s32(SensorThresholdTlvAttrId.THERMAL, temp)
+            logger.warning(f"Thermal threshold exceeded: {temp} mC")
+            exceeded = True
+
+    if volt is not None:
+        fw_state.set_curr_volt(volt)
+        if volt < fw_state.get_volt_min() or volt > fw_state.get_volt_max():
+            msg.add_s32(SensorThresholdTlvAttrId.VOLT_EXCEEDED_FLAG, 1)
+            msg.add_s32(SensorThresholdTlvAttrId.VOLTAGE, volt)
+            logger.warning(f"Voltage threshold exceeded: {volt} mV")
+            exceeded = True
+
+    if not exceeded:
+        logger.info("Sensor values within thresholds, nothing to inject")
+        return
+
+    logger.info("Sending sensor threshold exceeded event to host")
+    send_to_host(msg)
 
 
 def fw_upgrade_request_next_chunk() -> None:

@@ -161,8 +161,16 @@ class MockFwState:
     def get_curr_temp(self) -> int:
         return self._sensor_temp
 
+    def set_curr_temp(self, temp: int) -> None:
+        logger.debug(f"Setting sensor temperature to {temp} mC")
+        self._sensor_temp = temp
+
     def get_curr_volt(self) -> int:
         return self._sensor_volt
+
+    def set_curr_volt(self, volt: int) -> None:
+        logger.debug(f"Setting sensor voltage to {volt} mV")
+        self._sensor_volt = volt
 
     def get_host_owns_nic(self) -> bool:
         return self._host_owns_nic
