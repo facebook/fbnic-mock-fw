@@ -9,6 +9,7 @@ import array
 import logging
 import mmap
 import os
+import selectors
 import socket
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ from mock_fw_upstream.parsers import parse_baraccess_data, parse_msg, parse_sysm
 logger = logging.getLogger(__name__)
 
 REMOTE_MAX_FDS = 8
+INJECTION_SOCKET_PATH = "/tmp/fbnic-fw-ctl"
 
 
 def _get_systemd_socket() -> socket.socket | None:
@@ -73,6 +75,21 @@ def setup_socket(socket_path: str) -> socket.socket:
     sock.listen(1)
 
     logger.info(f"Mock firmware listening on {socket_path}")
+
+    return sock
+
+
+def setup_injection_socket(socket_path: str) -> socket.socket:
+    """Set up the injection Unix domain socket server."""
+
+    if os.path.exists(socket_path):
+        os.remove(socket_path)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(socket_path)
+    sock.listen(1)
+
+    logger.info(f"Injection socket listening on {socket_path}")
 
     return sock
 
@@ -154,6 +171,14 @@ def process_msg(msg: bytes, received_fds: list[int]) -> None:
     return
 
 
+def inject(cmd: str) -> None:
+    """Handle an on-demand injection command from the injection socket."""
+    if cmd == "hello":
+        logger.info("Injection: hello")
+    else:
+        logger.error(f"Unknown injection command: {cmd!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Mock firmware server for testing",
@@ -200,10 +225,22 @@ def main():
         )
         sys.exit(1)
 
+    injection_sock = setup_injection_socket(INJECTION_SOCKET_PATH)
+    sel = selectors.DefaultSelector()
+    fw_state.conn.setblocking(False)
+    sel.register(fw_state.conn, selectors.EVENT_READ, "qemu")
+    sel.register(injection_sock, selectors.EVENT_READ, "injection")
+
     try:
         # Always notify the host that we are ready to accept messages
         set_host_interrupt()
         while True:
+            if "injection" in {key.data for key, _ in sel.select()}:
+                conn, _ = injection_sock.accept()
+                with conn:
+                    inject(conn.recv(PAGE_SIZE).decode(errors="replace").strip())
+                continue
+
             # Use recvmsg to receive both data and file descriptors
             fds_bytes = REMOTE_MAX_FDS * array.array("i").itemsize
             anc_buf_size = socket.CMSG_SPACE(fds_bytes)
@@ -235,6 +272,9 @@ def main():
             process_all_msgs(msgs, received_fds)
 
     finally:
+        injection_sock.close()
+        if os.path.exists(INJECTION_SOCKET_PATH):
+            os.remove(INJECTION_SOCKET_PATH)
         if server_sock is not None:
             server_sock.close()
             if os.path.exists(socket_path):
