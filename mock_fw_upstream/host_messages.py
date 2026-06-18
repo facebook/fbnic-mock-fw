@@ -22,6 +22,7 @@ from mock_fw_upstream.mock_mbx import (
     MBX_0_REG_0_ADDR,
     MbxType,
     mock_mbx_0,
+    MockMbx,
     read_desc_32,
     read_desc_64,
     SLOT_WIDTH,
@@ -738,6 +739,25 @@ for handler_class in TlvMessageHandler.__subclasses__():
     TLV_MESSAGE_HANDLERS[handler.message_id] = handler
 
 
+def advance_head_over_completed(mbx: MockMbx) -> None:
+    """Advance a ring's head past every descriptor the host has marked with both
+    HOST_CMPL and FW_CMPL set. Keep advancing while the next descriptor is also
+    completed; stop at the first one that does not have both bits set. Applies to
+    both the Rx and Tx rings."""
+    both_cmpl = HostIpcMbxDesc.HOST_CMPL | HostIpcMbxDesc.FW_CMPL
+    start = mbx.head
+    while True:
+        # HOST_CMPL/FW_CMPL both live in the lower 32-bit slot, so that's all we
+        # need to read.
+        if (mbx.slots[mbx.head] & both_cmpl) != both_cmpl:
+            break
+        mbx.head = mbx.next_slot(mbx.head)
+        logger.info(f"{mbx.name}: advancing head past completed desc to {mbx.head}")
+        if mbx.head == start:
+            # Every descriptor is completed; stop to avoid spinning forever.
+            break
+
+
 def process_descriptor_write(addr: bytes, val: int) -> None:
     mbx = get_mbx(addr)
     slot_idx = mbx.get_slot(addr)
@@ -746,6 +766,11 @@ def process_descriptor_write(addr: bytes, val: int) -> None:
     # skip processing entire descriptor if it's a write to an upper slot
     if slot_idx % 2 == 1:
         return
+
+    # Advance the head past every descriptor the host has completed (both
+    # HOST_CMPL and FW_CMPL set), stopping at the first descriptor that does not
+    # have both bits set. Applies to both the Rx and Tx rings.
+    advance_head_over_completed(mbx)
 
     if mbx.type == MbxType.RX:
         # skip processing RX MBX write, was just for book-keeping
