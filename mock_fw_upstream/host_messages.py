@@ -831,7 +831,7 @@ def process_descriptor_read(addr: bytes) -> None:
 def process_tlv_tx_msg(msg_hdr: ParsedTlvHdr, attr_bytes: bytes) -> None:
     type_id = msg_hdr.type_id
 
-    if type_id not in TlvMsgId:
+    if type_id not in TlvMsgId._value2member_map_:
         logger.info(
             f"Message ID {type_id:#x} is currently not supported and won't be processed!"
         )
