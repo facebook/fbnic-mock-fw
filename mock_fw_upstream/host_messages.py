@@ -58,6 +58,7 @@ QSFP_50R2_BIN_PATH = "qsfp_binaries/qsfp_50R2_anonymized.bin"
 
 
 class TlvMsgId(IntEnum):
+    TEST = 0x0
     HOST_CAP_REQ = 0x10
     FW_CAP_RESP = 0x11
     OWNERSHIP_REQ = 0x12
@@ -831,6 +832,16 @@ def process_descriptor_read(addr: bytes) -> None:
 def process_tlv_tx_msg(msg_hdr: ParsedTlvHdr, attr_bytes: bytes) -> None:
     type_id = msg_hdr.type_id
 
+    if type_id == TlvMsgId.TEST:
+        # The driver's FW mailbox self-test (ethtool -t offline) sends a TEST
+        # message full of randomized values plus a nested copy and expects the
+        # FW to echo them back verbatim; it memcmps the reply against what it
+        # sent. Reflect the exact bytes we received rather than re-synthesizing
+        # the (randomized, nested) payload.
+        logger.info(f"Processing message: {TlvMsgId.TEST.name} (echo)")
+        send_bytes_to_host(msg_hdr.serialize() + attr_bytes)
+        return
+
     if type_id not in TlvMsgId._value2member_map_:
         logger.info(
             f"Message ID {type_id:#x} is currently not supported and won't be processed!"
@@ -902,6 +913,10 @@ def gen_dummy_cmpl_msg(parsed_bar: ParsedBar) -> bytes:
 
 
 def send_to_host(tlv_builder: TlvMessageBuilder) -> None:
+    send_bytes_to_host(tlv_builder.build())
+
+
+def send_bytes_to_host(tlv_msg: bytes) -> None:
     # 1. Find ready slot in mailbox rx
     ADDR_WIDTH = 6  # bytes
     avail_slot_idx = mock_mbx_0.head
@@ -917,7 +932,6 @@ def send_to_host(tlv_builder: TlvMessageBuilder) -> None:
     dma_addr = extract_address(desc)
 
     # 2. Write to page
-    tlv_msg = tlv_builder.build()
     bytes_to_write = len(tlv_msg)
     dma_write(dma_addr, tlv_msg, bytes_to_write)
 
