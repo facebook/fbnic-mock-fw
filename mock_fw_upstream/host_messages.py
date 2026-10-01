@@ -179,6 +179,9 @@ class QSFPReadTlvAttrId(IntEnum):
 class TSeneDataTlvAttrId(IntEnum):
     TSENE_THERM = 0x0
     TSENE_VOLT = 0x1
+    TSENE_ERROR = 0x2
+    TSENE_THERM_ALARM_STATE = 0x3
+    TSENE_VOLT_ALARM_STATE = 0x4
 
 
 class ComphyModeTlvAttrId(IntEnum):
@@ -188,10 +191,19 @@ class ComphyModeTlvAttrId(IntEnum):
 
 
 class SensorThresholdTlvAttrId(IntEnum):
-    THERM_EXCEEDED_FLAG = 0x0
-    VOLT_EXCEEDED_FLAG = 0x1
+    THERM_ALARM = 0x0
+    VOLT_ALARM = 0x1
     THERMAL = 0x2
     VOLTAGE = 0x3
+
+
+class SensorAlarm(IntEnum):
+    NORMAL = 0x0
+    # Firmware predating alarm state reporting sent 1 for any threshold event.
+    DEPRECATED = 0x1
+    BELOW_MIN = 0x2
+    ABOVE_MAX = 0x3
+    CRIT = 0x4
 
 
 TLV_MESSAGE_HANDLERS = {}
@@ -680,13 +692,19 @@ class TSeneDataRequestHandler(TlvMessageHandler):
         return [
             tlv_attr_s32(TSeneDataTlvAttrId.TSENE_THERM),
             tlv_attr_s32(TSeneDataTlvAttrId.TSENE_VOLT),
+            tlv_attr_u32(TSeneDataTlvAttrId.TSENE_THERM_ALARM_STATE),
+            tlv_attr_u32(TSeneDataTlvAttrId.TSENE_VOLT_ALARM_STATE),
         ]
 
     def handle(self) -> None:
+        temp = fw_state.get_curr_temp()
+        volt = fw_state.get_curr_volt()
         msg = (
             TlvMessageBuilder(TlvMsgId.TSENE_DATA_RESP)
-            .add_s32(TSeneDataTlvAttrId.TSENE_THERM, fw_state.get_curr_temp())
-            .add_s32(TSeneDataTlvAttrId.TSENE_VOLT, fw_state.get_curr_volt())
+            .add_s32(TSeneDataTlvAttrId.TSENE_THERM, temp)
+            .add_s32(TSeneDataTlvAttrId.TSENE_VOLT, volt)
+            .add_u32(TSeneDataTlvAttrId.TSENE_THERM_ALARM_STATE, _temp_alarm(temp))
+            .add_u32(TSeneDataTlvAttrId.TSENE_VOLT_ALARM_STATE, _volt_alarm(volt))
         )
 
         logger.info("Sending sensor data to host")
@@ -1015,33 +1033,72 @@ def gen_caps_response() -> bytes:
     )
 
 
+def _temp_alarm(temp: int) -> SensorAlarm:
+    """Classify a temperature, each range is inclusive of its lower bound."""
+    if temp >= fw_state.get_temp_crit():
+        return SensorAlarm.CRIT
+    if temp >= fw_state.get_temp_warn():
+        return SensorAlarm.ABOVE_MAX
+    if temp >= fw_state.get_temp_min():
+        return SensorAlarm.NORMAL
+    return SensorAlarm.BELOW_MIN
+
+
+def _volt_alarm(volt: int) -> SensorAlarm:
+    """Classify a voltage, voltage has no crit threshold,
+    so it never reports CRIT.
+    """
+    if volt >= fw_state.get_volt_max():
+        return SensorAlarm.ABOVE_MAX
+    if volt >= fw_state.get_volt_min():
+        return SensorAlarm.NORMAL
+    return SensorAlarm.BELOW_MIN
+
+
 def send_sensor_threshold_exceeded(temp: int | None, volt: int | None) -> None:
-    """Send an unsolicited sensor threshold exceeded event to the host."""
+    """Send an unsolicited sensor threshold event to the host.
 
-    msg = TlvMessageBuilder(TlvMsgId.SENSOR_THRESHOLD_EXCEEDED_RESP)
-    exceeded = False
+    Firmware raises this from the sensor ISR, whose trip points bracket the
+    range the sensor currently sits in, so a sensor only appears in the event
+    once it has crossed into a new range. It reports the range entered, so a
+    reading back inside the normal range is sent too, which is what clears the
+    host's alarm.
+    """
 
-    if temp is not None:
-        fw_state.set_curr_temp(temp)
-        if temp < fw_state.get_temp_min() or temp > fw_state.get_temp_warn():
-            msg.add_s32(SensorThresholdTlvAttrId.THERM_EXCEEDED_FLAG, 1)
-            msg.add_s32(SensorThresholdTlvAttrId.THERMAL, temp)
-            logger.warning(f"Thermal threshold exceeded: {temp} mC")
-            exceeded = True
-
-    if volt is not None:
-        fw_state.set_curr_volt(volt)
-        if volt < fw_state.get_volt_min() or volt > fw_state.get_volt_max():
-            msg.add_s32(SensorThresholdTlvAttrId.VOLT_EXCEEDED_FLAG, 1)
-            msg.add_s32(SensorThresholdTlvAttrId.VOLTAGE, volt)
-            logger.warning(f"Voltage threshold exceeded: {volt} mV")
-            exceeded = True
-
-    if not exceeded:
-        logger.info("Sensor values within thresholds, nothing to inject")
+    if temp is None and volt is None:
+        logger.info("No sensor value supplied, nothing to inject")
         return
 
-    logger.info("Sending sensor threshold exceeded event to host")
+    msg = TlvMessageBuilder(TlvMsgId.SENSOR_THRESHOLD_EXCEEDED_RESP)
+    crossed = False
+
+    if temp is not None:
+        previous = _temp_alarm(fw_state.get_curr_temp())
+        fw_state.set_curr_temp(temp)
+        alarm = _temp_alarm(temp)
+        if alarm != previous:
+            msg.add_s32(SensorThresholdTlvAttrId.THERMAL, temp)
+            msg.add_u32(SensorThresholdTlvAttrId.THERM_ALARM, alarm)
+            log = logger.info if alarm is SensorAlarm.NORMAL else logger.warning
+            log(f"Thermal alarm {alarm.name}: {temp} mC")
+            crossed = True
+
+    if volt is not None:
+        previous = _volt_alarm(fw_state.get_curr_volt())
+        fw_state.set_curr_volt(volt)
+        alarm = _volt_alarm(volt)
+        if alarm != previous:
+            msg.add_s32(SensorThresholdTlvAttrId.VOLTAGE, volt)
+            msg.add_u32(SensorThresholdTlvAttrId.VOLT_ALARM, alarm)
+            log = logger.info if alarm is SensorAlarm.NORMAL else logger.warning
+            log(f"Voltage alarm {alarm.name}: {volt} mV")
+            crossed = True
+
+    if not crossed:
+        logger.info("No trip point crossed, nothing to inject")
+        return
+
+    logger.info("Sending sensor threshold event to host")
     send_to_host(msg)
 
 
